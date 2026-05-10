@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!--
+### BEGIN LICENSE
+# Copyright (C) 2013 Peter Levi <peterlevi@peterlevi.com>
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 3, as published
+# by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranties of
+# MERCHANTABILITY, SATISFACTORY QUALITY, or FITNESS FOR A PARTICULAR
+# PURPOSE.  See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+### END LICENSE
+-->
+
+<html>
+
+<head>
+    <link rel="stylesheet" href="browse.css" type="text/css"/>
+</head>
+
+<body>
+<div id="main">
+    <div id="header">
+        <div id="title"></div>
+        <div id="title-path"></div>
+        <div id="gutter"></div>
+        <div id="title-info"></div>
+        <div id="search-button" class="clickable">
+            <img src="images/search.svg" title="Tip: Typing directly starts searching"/>
+        </div>
+        <div id="search-box">
+            <img id="search-icon" src="images/search.svg"/>
+            <input type="search" id="search-field"/>
+        </div>
+        <div id="close-button" class="clickable">
+            <img src="images/close.svg" title="Exit Ojo"/>
+        </div>
+    </div>
+
+    <div id="content">
+        <div id="submode">
+            <span id="submode-link-browse" class="submode-link submode-link-active"
+                  data-submode="browse">Browse</span>
+            <span id="submode-link-exif" class="submode-link" data-submode="exif">File Info</span>
+        </div>
+        <div id="exif" class="scroll-container pane" style="display: none">
+            <div id="exif-search-box">
+                <div id="exif-search-container">
+                    <img id="exif-search-icon" src="images/search.svg"/>
+                    <input type="search" id="exif-search-field"/>
+                </div>
+            </div>
+            <pre id="exif-content"></pre>
+        </div>
+        <div id="folders" class="scroll-container pane"></div>
+        <div id="images" class="scroll-container pane"></div>
+    </div>
+
+    <br style="clear: both"><br/><br/>&nbsp;
+
+    <div id="label">
+        <span id="filename" class="info-part"></span>
+
+        <span id="file-info" title="Click for full info">
+            <span id="dimensions" class="info-part"></span>
+            <span class="separator"></span>
+            <span id="file-size" class="info-part"></span>
+            <span class="separator"></span>
+            <span id="file-date" class="info-part"></span>
+            <span class="separator"></span>
+            <span id="exif-info" class="info-part"></span>
+        </span>
+    </div>
+
+    <div id="progress"></div>
+</div>
+</body>
+
+<script src="lib/jquery-2.0.2.min.js" type="text/javascript"></script>
+<script src="lib/underscore-min.js" type="text/javascript"></script>
+<script src="browse.js" type="text/javascript"></script>
+
+</html>
