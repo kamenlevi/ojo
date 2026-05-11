@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from collections import OrderedDict
 from datetime import datetime
 
@@ -18,36 +19,50 @@ def needs_rotation(meta):
 class Metadata:
     def __init__(self):
         self.cache = OrderedDict()
+        self.lock = threading.Lock()
 
     def clear_cache(self):
-        self.cache.clear()
+        with self.lock:
+            self.cache.clear()
 
     def get(self, filename):
-        meta = self.cache.get(filename)
-        if meta:
-            self.cache.move_to_end(filename)
-            return meta
+        with self.lock:
+            meta = self.cache.get(filename)
+            if meta:
+                self.cache.move_to_end(filename)
+                return meta
 
         meta = self.read(filename)
         if not meta:
             meta = self.read_via_pixbuf(filename)
 
-        self.cache[filename] = meta
-        if len(self.cache) > METADATA_CACHE_SIZE:
-            self.cache.popitem(last=False)
+        with self.lock:
+            self.cache[filename] = meta
+            if len(self.cache) > METADATA_CACHE_SIZE:
+                self.cache.popitem(last=False)
         return meta
 
     def get_cached(self, filename):
-        return self.cache.get(filename, None)
+        with self.lock:
+            return self.cache.get(filename, None)
 
     def read_via_pixbuf(self, filename):
         w, h = imaging.get_size_via_pixbuf(filename)
-        stat = os.stat(filename)
+        try:
+            stat = os.stat(filename)
+        except OSError:
+            return {
+                "filename": os.path.basename(filename),
+                "needs_rotation": False,
+                "width": w, "height": h,
+                "orientation": None,
+                "file_date": 0, "file_size": 0,
+                "exif": {},
+            }
         return {
             "filename": os.path.basename(filename),
             "needs_rotation": False,
-            "width": w,
-            "height": h,
+            "width": w, "height": h,
             "orientation": None,
             "file_date": stat.st_mtime,
             "file_size": stat.st_size,
@@ -60,31 +75,34 @@ class Metadata:
                 return None
 
             meta = imaging.exiftool.get_metadata(filename)
-
             meta["SourceFile"] = {"desc": "Source File", "val": meta["SourceFile"]}
 
-            # also cache the most important part
             needs_rot = needs_rotation(meta)
             stat = os.stat(filename)
+
+            w_key = "ImageWidth" if not needs_rot else "ImageHeight"
+            h_key = "ImageHeight" if not needs_rot else "ImageWidth"
+
+            width = meta.get(w_key, {}).get("val", 0)
+            height = meta.get(h_key, {}).get("val", 0)
+            if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+                width, height = 0, 0
 
             result = {
                 "filename": os.path.basename(filename),
                 "needs_rotation": needs_rot,
-                "width": meta["ImageWidth" if not needs_rot else "ImageHeight"]["val"],
-                "height": meta["ImageHeight" if not needs_rot else "ImageWidth"]["val"],
+                "width": int(width),
+                "height": int(height),
                 "orientation": meta.get("Orientation", {"val": None})["val"],
                 "file_date": stat.st_mtime,
                 "file_size": stat.st_size,
                 "exif": meta,
             }
 
-            if ext(filename) == ".svg":
-                # svg sizing is special, exiftool could return things like "270mm" which causes
-                # exceptions downstream, as width and height are expected to be numbers.
-                # So use size from pixbuf, it works OK for svgs.
-                meta_svg = self.read_via_pixbuf(filename)
-                result["width"] = meta_svg["width"]
-                result["height"] = meta_svg["height"]
+            if ext(filename) == ".svg" or result["width"] == 0 or result["height"] == 0:
+                meta_fallback = self.read_via_pixbuf(filename)
+                result["width"] = meta_fallback["width"]
+                result["height"] = meta_fallback["height"]
 
             return result
 
