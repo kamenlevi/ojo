@@ -313,6 +313,8 @@ class Ojo:
             self.scroll_v = self.scroll_window.get_vadjustment().get_value()
 
     def show(self, filename=None, quick=False):
+        if self.killed:
+            return
         filename = filename or self.selected
         if not filename:
             return
@@ -337,6 +339,8 @@ class Ojo:
             logging.warning("Cannot open " + filename)
 
     def refresh_image(self, filename=None):
+        if self.killed:
+            return
         shown = filename or self.shown
         if not shown:
             return
@@ -355,18 +359,24 @@ class Ojo:
             else:
                 return
 
+        if self.killed:
+            return
+
         self.increase_size()
-        if ext(shown) in (".gif", ".mng", ".png", ".webp"):
-            try:
-                anim = GdkPixbuf.PixbufAnimation.new_from_file(shown)
-                if anim.is_static_image():
+        try:
+            if ext(shown) in (".gif", ".mng", ".png", ".webp"):
+                try:
+                    anim = GdkPixbuf.PixbufAnimation.new_from_file(shown)
+                    if anim.is_static_image():
+                        self.image.set_from_pixbuf(self.pixbuf)
+                    else:
+                        self.image.set_from_animation(anim)
+                except Exception:
                     self.image.set_from_pixbuf(self.pixbuf)
-                else:
-                    self.image.set_from_animation(anim)
-            except Exception:
+            else:
                 self.image.set_from_pixbuf(self.pixbuf)
-        else:
-            self.image.set_from_pixbuf(self.pixbuf)
+        except Exception:
+            logging.exception("Failed to set image widget")
 
     def get_image_list(self):
         images = list_images(self.folder)
@@ -613,7 +623,10 @@ class Ojo:
         if (event.width, event.height, event.x, event.y) != (
             last_width, last_height, last_x, last_y,
         ):
-            GObject.idle_add(self.refresh_image)
+            resize_timer = getattr(self, "_resize_timer", None)
+            if resize_timer:
+                GObject.source_remove(resize_timer)
+            self._resize_timer = GObject.timeout_add(50, self._on_resize_done)
             if time.time() - self.last_automatic_resize > 0.5:
                 self.manually_resized = True
 
@@ -621,6 +634,12 @@ class Ojo:
         self.last_height = event.height
         self.last_x = event.x
         self.last_y = event.y
+
+    def _on_resize_done(self):
+        self._resize_timer = None
+        if self.mode == "image" and self.shown and not self.killed:
+            self.refresh_image()
+        return False
 
     def window_state_changed(self, widget, event):
         options["maximized"] = event.new_window_state & Gdk.WindowState.MAXIMIZED != 0
@@ -1717,6 +1736,9 @@ class Ojo:
         GObject.idle_add(_go)
 
     def exit(self, *args):
+        if self.killed:
+            return
+        self.killed = True
         logging.info("Exiting, closing window...")
         self.window.hide()
 

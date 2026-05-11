@@ -314,15 +314,17 @@ def auto_rotate_pixbuf(orientation, im):
 
 
 def pil_to_pixbuf(pil_image):
-    if pil_image.mode not in ("RGB", "RGBA"):
+    if pil_image.mode != "RGB":
         pil_image = pil_image.convert("RGB")
-    has_alpha = pil_image.mode == "RGBA"
-    w, h = pil_image.size
-    data = pil_image.tobytes()
-    return GdkPixbuf.Pixbuf.new_from_data(
-        data, GdkPixbuf.Colorspace.RGB, has_alpha,
-        8, w, h, w * (4 if has_alpha else 3),
-    )
+    buff = io.BytesIO()
+    pil_image.save(buff, "ppm")
+    contents = buff.getvalue()
+    buff.close()
+    loader = GdkPixbuf.PixbufLoader()
+    loader.write(contents)
+    pixbuf = loader.get_pixbuf()
+    loader.close()
+    return pixbuf
 
 
 def pil_to_base64(pil_image):
