@@ -310,7 +310,7 @@ class Ojo:
             self.register_action()
             self.shown = filename
             self.selected = self.shown
-            self.window.set_title(f"ojo - {self.shown}")
+            self.window.set_title(f"ojoooo - {self.shown}")
             self.refresh_image()
 
             if not quick:
@@ -1718,7 +1718,7 @@ class Ojo:
             elif self.mode == "folder":
                 self.been_in_folder_mode = True
                 self.shown = None
-                self.window.set_title(f"ojo - {self.folder}")
+                self.window.set_title(f"ojoooo - {self.folder}")
                 if hasattr(self, "browser"):
                     self.browser.grab_focus()
 
