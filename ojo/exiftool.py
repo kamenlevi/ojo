@@ -53,17 +53,63 @@ Example usage::
                                          d["EXIF:DateTimeOriginal"]))
 """
 
+from __future__ import unicode_literals
+
+import codecs
 import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 
+try:  # Py3k compatibility
+    basestring
+except NameError:
+    basestring = (bytes, str)
+
+
+# Sentinel indicating the end of the output of a sequence of commands.
+# The standard value should be fine.
 sentinel = b"{ready}"
+
+# The block size when reading from exiftool.  The standard value
+# should be fine, though other values might give better performance in
+# some cases.
 block_size = 4096
 
+# This code has been adapted from Lib/os.py in the Python source tree
+# (sha1 265e36e277f3)
+def _fscodec():
+    encoding = sys.getfilesystemencoding()
+    errors = "strict"
+    if encoding != "mbcs":
+        try:
+            codecs.lookup_error("surrogateescape")
+        except LookupError:
+            pass
+        else:
+            errors = "surrogateescape"
 
-class ExifTool:
+    def fsencode(filename):
+        """
+        Encode filename to the filesystem encoding with 'surrogateescape' error
+        handler, return bytes unchanged. On Windows, use 'strict' error handler if
+        the file system encoding is 'mbcs' (which is the default encoding).
+        """
+        if isinstance(filename, bytes):
+            return filename
+        else:
+            return filename.encode(encoding, errors)
+
+    return fsencode
+
+
+fsencode = _fscodec()
+del _fscodec
+
+
+class ExifTool(object):
     """Run the `exiftool` command-line tool and communicate to it.
 
     You can pass the file name of the ``exiftool`` executable as an
@@ -115,12 +161,13 @@ class ExifTool:
             if self.running:
                 logging.warning("ExifTool already running, starting again is a noop.")
                 return self
-            self._process = subprocess.Popen(
-                [self.executable, "-stay_open", "True", "-@", "-"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
+            with open(os.devnull, "w") as devnull:
+                self._process = subprocess.Popen(
+                    [self.executable, "-stay_open", "True", "-@", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=devnull,
+                )
             self.running = True
             if show_version and logging.getLogger().isEnabledFor(logging.INFO):
                 logging.info("ExifTool Version: %s", self.execute("-ver"))
@@ -202,7 +249,7 @@ class ExifTool:
         respective Python version – as raw strings in Python 2.x and
         as Unicode strings in Python 3.x.
         """
-        params = map(os.fsencode, params)
+        params = map(fsencode, params)
         return json.loads(self.execute(b"-j", b"-l", *params))
 
     def get_metadata_batch(self, filenames):
@@ -234,9 +281,9 @@ class ExifTool:
         """
         # Explicitly ruling out strings here because passing in a
         # string would lead to strange and hard-to-find errors
-        if isinstance(tags, (bytes, str)):
+        if isinstance(tags, basestring):
             raise TypeError("The argument 'tags' must be " "an iterable of strings")
-        if isinstance(filenames, (bytes, str)):
+        if isinstance(filenames, basestring):
             raise TypeError("The argument 'filenames' must be " "an iterable of strings")
         params = ["-" + t for t in tags]
         params.extend(filenames)

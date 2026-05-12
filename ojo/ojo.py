@@ -20,14 +20,8 @@ import gi  # isort:skip
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-try:
-    gi.require_version("WebKit2", "4.1")
-except ValueError:
-    gi.require_version("WebKit2", "4.0")
-try:
-    gi.require_version("GExiv2", "0.10")
-except ValueError:
-    pass
+gi.require_version("WebKit2", "4.0")
+gi.require_version("GExiv2", "0.10")
 from gi.repository import Gdk, GdkPixbuf, GObject, Gtk  # isort:skip
 # fmt: on
 
@@ -36,7 +30,7 @@ from datetime import datetime
 import gc
 import json
 import logging
-import argparse
+import optparse
 import os
 import queue
 import signal
@@ -80,13 +74,8 @@ class OjoThread(threading.Thread):
     def run(self) -> None:
         try:
             super().run()
-        except Exception:
-            logging.exception("Exception in OjoThread")
         finally:
-            try:
-                self.ojo.threads.remove(self)
-            except ValueError:
-                pass
+            self.ojo.threads.remove(self)
             logging.debug("Threads count: %d", len(self.ojo.threads))
 
 
@@ -103,38 +92,36 @@ class OjoTimer(threading.Timer):
     def run(self) -> None:
         try:
             super().run()
-        except Exception:
-            logging.exception("Exception in OjoTimer")
         finally:
-            try:
-                self.ojo.threads.remove(self)
-            except ValueError:
-                pass
+            self.ojo.threads.remove(self)
 
 
 class Ojo:
     def parse_command_line(self):
-        parser = argparse.ArgumentParser(prog="ojoooo", description="ojoooo Image Viewer")
-        parser.add_argument("--version", action="version", version="%(prog)s " + ojoconfig.__version__)
-        parser.add_argument(
-            "-d", "--debug",
+        # Support for command line options.
+        parser = optparse.OptionParser(
+            version="%%prog %s" % ojoconfig.__version__, usage="ojo [options]"
+        )
+        parser.add_option(
+            "-d",
+            "--debug",
             dest="debug_mode",
             action="store_true",
-            default=False,
             help="Print the maximum debugging info (implies -vv)",
         )
-        parser.add_argument(
-            "-v", "--verbose",
+        parser.add_option(
+            "-v",
+            "--verbose",
             dest="logging_level",
             action="count",
-            default=0,
             help="set error_level output to warning, info, and then debug",
         )
-        parser.add_argument("files", nargs="*", default=[])
-        self.command_options = parser.parse_args()
-        self.command_args = [os.path.expanduser(p) for p in self.command_options.files]
+        parser.set_defaults(logging_level=0)
+        (self.command_options, self.command_args) = parser.parse_args()
+        self.command_args = [os.path.expanduser(p) for p in self.command_args]
 
     def setup_logging(self):
+        # set the verbosity
         if self.command_options.debug_mode:
             self.command_options.logging_level = 3
         logging.basicConfig(
@@ -145,6 +132,7 @@ class Ojo:
         )
 
     def __init__(self):
+        # Fix a problem with WebView on Wayland (https://bugs.webkit.org/show_bug.cgi?id=238513#c0)
         os.environ["WEBKIT_DISABLE_COMPOSITING_MODE"] = "1"
 
         self.lock = threading.Lock()
@@ -152,8 +140,6 @@ class Ojo:
         self.threads = []
         self.thumbs = None
         self.folder_thumbs = None
-        self.images = []
-        self.folder = None
         self.parse_command_line()
         self.setup_logging()
         config.load_options()
@@ -162,7 +148,7 @@ class Ojo:
         if len(self.command_args) >= 1 and os.path.exists(self.command_args[0]):
             path = os.path.realpath(self.command_args[0])
         else:
-            path = _u(options.get("folder", util.get_xdg_pictures_folder()))
+            path = _u(options["folder"])
         logging.info("Started with: %s" % path)
         if not os.path.exists(path):
             logging.warning(
@@ -172,6 +158,7 @@ class Ojo:
             path = util.get_xdg_pictures_folder()
 
         self.window = Gtk.Window(Gtk.WindowType.TOPLEVEL)
+
         self.window.set_position(Gtk.WindowPosition.CENTER)
 
         self.visual = self.window.get_screen().get_rgba_visual()
@@ -203,14 +190,14 @@ class Ojo:
         self.mousedown_zoomed = False
         self.mousedown_panning = False
 
-        self.window.set_decorated(options.get("decorated", True))
-        if options.get("maximized", False):
+        self.window.set_decorated(options["decorated"])
+        if options["maximized"]:
             self.window.maximize()
 
         self.pix_cache = {
             False: OrderedDict(),
             True: OrderedDict(),
-        }
+        }  # keyed by "zoomed" property
         self.current_preparing = None
         self.manually_resized = False
 
@@ -222,9 +209,8 @@ class Ojo:
         self.last_folder_change_time = time.time()
         self.last_key_event_time = None
         self.shown = None
-        self.selected = path
-        self.toggle_fullscreen(options.get("fullscreen", False), first_run=True)
-        if options.get("fullscreen", False):
+        self.toggle_fullscreen(options["fullscreen"], first_run=True)
+        if options["fullscreen"]:
             self.window.resize(*self.get_recommended_size())
 
         if os.path.isfile(path):
@@ -269,7 +255,7 @@ class Ojo:
             dialog.run()
             dialog.destroy()
         else:
-            self.js('show_error("Oops: %s")' % error_msg.replace('"', '\\"'))
+            self.js('show_error("Oops: %s")' % error_msg)
 
     def safe(self, fn):
         def safe_fn(*args, **kwargs):
@@ -285,8 +271,7 @@ class Ojo:
         return safe_fn
 
     def js(self, command=None, commands=None):
-        if hasattr(self, 'browser'):
-            self.browser.js(command, commands)
+        self.browser.js(command, commands)
 
     def select_in_browser(self, path):
         if path:
@@ -299,14 +284,14 @@ class Ojo:
 
     def update_zoom_scrolling(self):
         if self.zoom:
-            if self.zoom_x_percent is not None:
+            if not self.zoom_x_percent is None:
                 ha = self.scroll_window.get_hadjustment()
                 ha.set_value(
                     self.zoom_x_percent
                     * (ha.get_upper() - ha.get_page_size() - ha.get_lower())
                 )
                 self.zoom_x_percent = None
-            if self.zoom_y_percent is not None:
+            if not self.zoom_y_percent is None:
                 va = self.scroll_window.get_vadjustment()
                 va.set_value(
                     self.zoom_y_percent
@@ -317,22 +302,18 @@ class Ojo:
             self.scroll_v = self.scroll_window.get_vadjustment().get_value()
 
     def show(self, filename=None, quick=False):
-        if self.killed:
-            return
         filename = filename or self.selected
-        if not filename:
-            return
         logging.info("Showing " + filename)
 
         if not quick and self.is_command(filename):
-            self.on_command(self.selected[self.selected.index(":") + 1:])
+            self.on_command(self.selected[self.selected.index(":") + 1 :])
         elif os.path.isdir(filename):
             self.change_to_folder(filename)
         elif is_image(filename):
             self.register_action()
             self.shown = filename
             self.selected = self.shown
-            self.window.set_title(f"ojoooo - {self.shown}")
+            self.window.set_title(f"ojoooo -{self.shown}")
             self.refresh_image()
 
             if not quick:
@@ -340,131 +321,98 @@ class Ojo:
                 self.select_in_browser(self.shown)
                 self.cache_around()
         else:
-            logging.warning("Cannot open " + filename)
+            raise Exception("Cannot open " + filename)
 
     def refresh_image(self, filename=None):
-        if self.killed:
-            return
         shown = filename or self.shown
-        if not shown:
-            return
 
-        try:
-            self.pixbuf = self.get_pixbuf(shown)
-        except Exception:
-            logging.exception("Failed to render %s", shown)
-            fallback = get_failed_image()
-            if shown != fallback:
-                try:
+        if shown:
+            try:
+                self.pixbuf = self.get_pixbuf(shown)
+            except Exception:
+                logging.exception("Failed to render %s", shown)
+                fallback = get_failed_image()
+                if shown != fallback:
                     self.pixbuf = self.get_pixbuf(fallback)
-                except Exception:
-                    logging.exception("Failed to render fallback image")
-                    return
-            else:
-                return
+                else:
+                    raise
 
-        if self.killed:
-            return
-
-        self.increase_size()
-        try:
-            if ext(shown) in (".gif", ".mng", ".png", ".webp"):
-                try:
-                    anim = GdkPixbuf.PixbufAnimation.new_from_file(shown)
-                    if anim.is_static_image():
-                        self.image.set_from_pixbuf(self.pixbuf)
-                    else:
-                        self.image.set_from_animation(anim)
-                except Exception:
+            self.increase_size()
+            if ext(shown) in (".gif", ".mng", ".png"):
+                anim = GdkPixbuf.PixbufAnimation.new_from_file(shown)
+                if anim.is_static_image():
                     self.image.set_from_pixbuf(self.pixbuf)
+                else:
+                    self.image.set_from_animation(anim)
             else:
                 self.image.set_from_pixbuf(self.pixbuf)
-        except Exception:
-            logging.exception("Failed to set image widget")
 
     def get_image_list(self):
         images = list_images(self.folder)
-        if not options.get("show_hidden", False):
+        dates = {}
+        if not options["show_hidden"]:
             images = [f for f in images if not os.path.basename(f).startswith(".")]
 
-        sort_by = options.get("sort_by", "name")
-        if sort_by == "extension":
+        if options["sort_by"] == "extension":
             key = lambda f: (ext(f) + "_" + os.path.basename(f)).lower()
-        elif sort_by == "name":
+        elif options["sort_by"] == "name":
             key = lambda f: os.path.basename(f).lower()
-        elif sort_by == "date":
-            key = lambda f: self._safe_stat_mtime(f)
-        elif sort_by == "exif_date":
+        elif options["sort_by"] == "date":
+            key = lambda f: os.stat(f).st_mtime
+        elif options["sort_by"] == "exif_date":
             dates = {
                 image: self._exif_timestamp_fallback_mtime(image) for image in images
             }
-            key = lambda f: dates.get(f, 0)
-        elif sort_by == "size":
-            key = lambda f: self._safe_stat_size(f)
+            key = lambda f: dates[f]
+        elif options["sort_by"] == "size":
+            key = lambda f: os.stat(f).st_size
         else:
             key = lambda f: f
 
         images = sorted(images, key=key)
-        if options.get("sort_order", "asc") == "desc":
+        if options["sort_order"] == "desc":
             images = list(reversed(images))
 
         return images
 
-    def _safe_stat_mtime(self, f):
-        try:
-            return os.stat(f).st_mtime
-        except OSError:
-            return 0
-
-    def _safe_stat_size(self, f):
-        try:
-            return os.stat(f).st_size
-        except OSError:
-            return 0
-
     def get_group_key(self, image, sort_by=None):
         if not sort_by:
-            sort_by = options.get("sort_by", "name")
+            sort_by = options["sort_by"]
 
-        try:
-            if sort_by == "extension":
-                e = os.path.splitext(image)[1][1:].upper()
-                return e if e else "No extension"
-            elif sort_by == "date":
-                ts = self._safe_stat_mtime(image)
-                return self._format_date(ts)
-            elif sort_by == "exif_date":
-                exif_timestamp = self._exif_timestamp_fallback_mtime(image)
-                return self._format_date(exif_timestamp)
-            elif sort_by == "name":
-                return os.path.basename(image)[0].upper()
-            elif sort_by == "size":
-                size = self._safe_stat_size(image)
-                buckets = options.get("group_by_size_buckets", [[1e18, "Unknown"]])
-                return next((b[1] for b in buckets if b[0] > size), "Unknown")
-        except Exception:
-            pass
-        return None
+        if sort_by == "extension":
+            ext = os.path.splitext(image)[1][1:].upper()
+            return ext if ext else "No extension"
+        elif sort_by == "date":
+            ts = os.stat(image).st_mtime
+            return self._format_date(ts)
+        elif sort_by == "exif_date":
+            exif_timestamp = self._exif_timestamp_fallback_mtime(image)
+            return self._format_date(exif_timestamp)
+        elif sort_by == "name":
+            return os.path.basename(image)[0].upper()
+        elif sort_by == "size":
+            size = os.stat(image).st_size
+            buckets = options["group_by_size_buckets"]
+            return next(b[1] for b in buckets if b[0] > size)
+        else:
+            return None
 
     def _exif_timestamp_fallback_mtime(self, filename):
         exif_date = None
         try:
             m = metadata.get(filename)
             exif_date = m["exif"].get("DateTimeOriginal", {"val": None})["val"]
-        except Exception:
+        except:
             pass
         if exif_date:
             try:
                 return datetime.strptime(exif_date, EXIF_DATE_FORMAT).timestamp()
-            except Exception:
-                logging.warning("Could not parse EXIF date for %s", filename)
-        return self._safe_stat_mtime(filename)
+            except:
+                logging.exception("Could not parse EXIF date")
+        return os.stat(filename).st_mtime
 
     def _format_date(self, ts):
-        try:
-            return datetime.fromtimestamp(ts).strftime(options.get("date_format", "%Y-%m-%d"))
-        except (ValueError, OSError):
-            return "Unknown"
+        return datetime.fromtimestamp(ts).strftime(options["date_format"])
 
     def toggle_hidden(self, key):
         options["show_hidden"] = key == "true"
@@ -472,14 +420,12 @@ class Ojo:
         self.change_to_folder(self.folder, self.folder_history_position)
 
     def toggle_window_decorated(self):
-        options["decorated"] = not options.get("decorated", True)
+        options["decorated"] = not options["decorated"]
         config.save_options()
         self.window.set_decorated(options["decorated"])
 
     def toggle_groups(self, key):
-        show_groups = options.get("show_groups_for", {})
-        show_groups[options.get("sort_by", "name")] = key == "true"
-        options["show_groups_for"] = show_groups
+        options["show_groups_for"][options["sort_by"]] = key == "true"
         config.save_options()
         self.change_to_folder(self.folder, self.folder_history_position)
 
@@ -502,10 +448,13 @@ class Ojo:
         else:
             options["sort_by"] = key
             m = {
-                "extension": "asc", "name": "asc",
-                "date": "asc", "exif_date": "asc", "size": "desc",
+                "extension": "asc",
+                "name": "asc",
+                "date": "asc",
+                "exif_date": "asc",
+                "size": "desc",
             }
-            options["sort_order"] = m.get(key, "asc")
+            options["sort_order"] = m[key]
         config.save_options()
         self.change_to_folder(self.folder, self.folder_history_position)
 
@@ -519,7 +468,7 @@ class Ojo:
         if modify_history_position is None:
             if not same:
                 self.folder_history = self.folder_history[
-                    self.folder_history_position:
+                    self.folder_history_position :
                 ]
                 self.folder_history.insert(0, self.folder)
                 self.folder_history_position = 0
@@ -535,7 +484,8 @@ class Ojo:
         i = self.folder_history_position
         if i < len(self.folder_history) - 1:
             return self.folder_history[i + 1]
-        return None
+        else:
+            return None
 
     def folder_history_back(self):
         if self.folder_history_position < len(self.folder_history) - 1:
@@ -548,7 +498,8 @@ class Ojo:
         i = self.folder_history_position
         if i > 0:
             return self.folder_history[i - 1]
-        return None
+        else:
+            return None
 
     def folder_history_forward(self):
         if self.folder_history_position > 0:
@@ -558,43 +509,38 @@ class Ojo:
             )
 
     def get_parent_folder(self):
-        if self.folder:
-            return util.get_parent(self.folder)
-        return None
+        return util.get_parent(self.folder)
 
     def folder_parent(self):
-        parent = self.get_parent_folder()
-        if parent:
-            self.change_to_folder(parent)
+        if self.get_parent_folder():
+            self.change_to_folder(self.get_parent_folder())
 
     def change_to_folder(self, path, modify_history_position=None, on_ready=None):
-        if not path:
-            return
+        # make sure we fail early if there are permission or mounting issues:
         try:
             os.listdir(path)
         except OSError:
-            logging.warning("Cannot open %s", path)
-            self.show_error("Cannot open " + path)
-            return
+            raise Exception("Cannot open " + path)
 
         def _go():
-            if self.thumbs:
-                self.thumbs.reset_queues()
-            if self.folder_thumbs:
-                self.folder_thumbs.reset_queues()
+            self.thumbs.reset_queues()
+            self.folder_thumbs.reset_queues()
             self.pix_cache[False].clear()
             self.pix_cache[True].clear()
 
-            gc.collect()
+            # TODO: we may want to call metadata.clear_cache() here, or use a LRU policy for it
+
+            collected = gc.collect()
+            logging.debug("GC collected: %d" % collected)
 
             old_folder = self.folder
             self.set_folder(path, modify_history_position, bypass_search=True)
             self.selected = (
                 old_folder
-                if old_folder and self.folder == util.get_parent(old_folder)
+                if self.folder == util.get_parent(old_folder)
                 else self.images[0]
                 if self.images
-                else self.get_parent_folder() or self.folder
+                else self.get_parent_folder()
             )
             self.set_mode("folder")
             self.last_folder_change_time = time.time()
@@ -602,8 +548,10 @@ class Ojo:
             self.select_in_browser(self.selected)
 
         def _go_locked():
+            # use a lock so we only have one change_folder operation running at a time
             with self.action_lock:
                 _go()
+
             if on_ready:
                 on_ready()
 
@@ -625,25 +573,20 @@ class Ojo:
         last_y = getattr(self, "last_y", 0)
 
         if (event.width, event.height, event.x, event.y) != (
-            last_width, last_height, last_x, last_y,
+            last_width,
+            last_height,
+            last_x,
+            last_y,
         ):
-            resize_timer = getattr(self, "_resize_timer", None)
-            if resize_timer:
-                GObject.source_remove(resize_timer)
-            self._resize_timer = GObject.timeout_add(50, self._on_resize_done)
+            GObject.idle_add(self.refresh_image)
             if time.time() - self.last_automatic_resize > 0.5:
+                logging.debug("Manually resized, stop automatic resizing")
                 self.manually_resized = True
 
         self.last_width = event.width
         self.last_height = event.height
         self.last_x = event.x
         self.last_y = event.y
-
-    def _on_resize_done(self):
-        self._resize_timer = None
-        if self.mode == "image" and self.shown and not self.killed:
-            self.refresh_image()
-        return False
 
     def window_state_changed(self, widget, event):
         options["maximized"] = event.new_window_state & Gdk.WindowState.MAXIMIZED != 0
@@ -665,8 +608,8 @@ class Ojo:
         with self.action_lock:
             try:
                 self.show_loading_folder_msg()
-                self.set_folder(os.path.dirname(self.selected) if os.path.isfile(self.selected) else self.selected)
-            except OSError:
+                self.set_folder(os.path.dirname(self.selected))
+            except OSError as e:
                 logging.exception("Could not open %s" % self.selected)
                 self.selected = util.get_xdg_pictures_folder()
                 self.set_folder(self.selected)
@@ -708,15 +651,17 @@ class Ojo:
                 self.cache_around()
 
     def show_loading_folder_msg(self):
-        if options.get("sort_by") == "exif_date":
+        if options["sort_by"] == "exif_date":
             self.js('show_spinner("Sorting by EXIF date, please wait...")')
         else:
             self.js('show_spinner("Listing folder...")')
 
     def filter_hidden(self, files):
-        if options.get("show_hidden", False):
-            return files
-        return [f for f in files if not os.path.basename(f).startswith(".")]
+        return (
+            files
+            if options["show_hidden"]
+            else [f for f in files if not os.path.basename(f).startswith(".")]
+        )
 
     def get_file_info(self, meta):
         file_date = self._format_date(meta["file_date"])
@@ -727,14 +672,13 @@ class Ojo:
                 exif["ExposureTime"]["val"], exif["FNumber"]["val"], exif["ISO"]["val"]
             )
             if "FocalLength" in exif:
-                exif_info += "|Focal len " + str(exif["FocalLength"]["val"])
-            win = self.window.get_window()
-            window_width = win.get_width() if win else 0
+                exif_info += "|Focal len " + exif["FocalLength"]["val"]
+            window_width = self.window.get_window().get_width()
             if window_width >= 1400 and "Model" in exif:
-                exif_info += "|" + str(exif["Model"]["val"])
+                exif_info += "|" + exif["Model"]["val"]
             if window_width >= 1400 and "LensType" in exif:
-                exif_info += "|" + str(exif["LensType"]["val"])
-        except Exception:
+                exif_info += "|" + exif["LensType"]["val"]
+        except:
             exif_info = "No EXIF info"
         return {
             "filename": meta["filename"],
@@ -748,33 +692,22 @@ class Ojo:
     def update_selected_info(self, filename):
         if self.selected != filename or not os.path.isfile(filename):
             return
-        try:
-            meta = metadata.get(filename)
-            info = self.get_file_info(meta)
-            self.js("set_file_info('%s', %s)" % (util.path2url(filename), json.dumps(info)))
-        except Exception:
-            logging.exception("Could not update info for %s", filename)
+        meta = metadata.get(filename)
+        info = self.get_file_info(meta)
+        self.js("set_file_info('%s', %s)" % (util.path2url(filename), json.dumps(info)))
 
     def is_command(self, s):
-        return s and s.startswith("command:")
+        return s.startswith("command:")
 
     @util.debounce(0.05)
     def on_priority(self, argument):
-        try:
-            files = json.loads(argument)
-            if self.thumbs:
-                self.thumbs.priority_thumbs([util.url2path(f) for f in files])
-        except Exception:
-            logging.exception("Error in on_priority")
+        files = json.loads(argument)
+        self.thumbs.priority_thumbs([util.url2path(f) for f in files])
 
     @util.debounce(0.05)
     def on_priority_folders(self, argument):
-        try:
-            files = json.loads(argument)
-            if self.folder_thumbs:
-                self.folder_thumbs.priority_thumbs([util.url2path(f) for f in files])
-        except Exception:
-            logging.exception("Error in on_priority_folders")
+        files = json.loads(argument)
+        self.folder_thumbs.priority_thumbs([util.url2path(f) for f in files])
 
     def on_browser_action(self, action, argument):
         if action in ("ojo", "ojo-select"):
@@ -782,11 +715,13 @@ class Ojo:
             self.selected = path
             GObject.idle_add(lambda: self.update_selected_info(self.selected))
             if action == "ojo":
+
                 def _do():
                     self.from_browser_time = time.time()
                     self.show()
                     if os.path.isfile(path):
                         self.set_mode("image")
+
                 GObject.idle_add(self.safe(_do))
         elif action == "ojo-priority":
             self.on_priority(argument)
@@ -822,7 +757,7 @@ class Ojo:
                 self.search_text = self.search_text.replace("\\", "")
             self.search_text = self.search_text.replace("//", "/")
 
-            path = self.search_text[:self.search_text.rfind("/") + 1]
+            path = self.search_text[: self.search_text.rfind("/") + 1]
             if os.path.isdir(path) and os.path.normpath(path) != os.path.normpath(
                 self.folder
             ):
@@ -832,20 +767,24 @@ class Ojo:
                     search = self.search_text
 
                     def _on_ready():
-                        self.search_text = search[search.rfind("/") + 1:]
+                        self.search_text = search[search.rfind("/") + 1 :]
                         if is_image(search) or (
                             os.path.isdir(search) and os.path.normpath(search) != path
                         ):
                             self.toggle_search(
-                                True, bypass_search=True,
-                                set_search_field_to=search, search_for="",
+                                True,
+                                bypass_search=True,
+                                set_search_field_to=search,
+                                search_for="",
                             )
                             self.selected = search
                             self.select_in_browser(search)
                         else:
                             self.toggle_search(
-                                True, bypass_search=True,
-                                set_search_field_to=search, search_for=self.search_text,
+                                True,
+                                bypass_search=True,
+                                set_search_field_to=search,
+                                search_for=self.search_text,
                             )
 
                     self.change_to_folder(path, on_ready=_on_ready)
@@ -864,19 +803,18 @@ class Ojo:
     def get_parent_folder_item(self):
         if self.folder == "/":
             return None
-        folder = self.get_parent_folder()
-        if not folder:
-            return None
-        return dict(
-            self.get_folder_item(folder, group="Parent Folder"),
-            label="..",
-            filename="..",
-        )
+        else:
+            folder = self.get_parent_folder()
+            return dict(
+                self.get_folder_item(folder, group="Parent Folder"),
+                label="..",
+                filename="..",
+            )
 
     def get_folder_item(self, path, group="", label=None, icon=None, note=None):
         thumb = None
-        show_thumb = group == "Subfolders" and options.get("show_folder_thumbs", False)
-        if show_thumb and self.folder_thumbs:
+        show_thumb = group == "Subfolders" and options.show_folder_thumbs
+        if show_thumb:
             thumb = self.folder_thumbs.get_folder_thumbnail_path(path)
             if not os.path.exists(thumb):
                 self.folder_thumbs.enqueue([path])
@@ -893,8 +831,8 @@ class Ojo:
             if not show_thumb
             else (
                 thumb
-                if thumb and os.path.exists(thumb)
-                else "~~pending~~:%d" % folder_thumb_height(options.get("thumb_height", 180))
+                if os.path.exists(thumb)
+                else "~~pending~~:%d" % folder_thumb_height(options.thumb_height)
             ),
         }
 
@@ -904,6 +842,7 @@ class Ojo:
             try:
                 icon_url = util.path2url(util.get_icon_path(icon, 16))
             except Exception:
+                logging.exception("Could not get icon %s" % icon)
                 icon_url = None
         return {
             "type": "command",
@@ -935,9 +874,8 @@ class Ojo:
         }
         cmd = parts[0]
         args = parts[1:]
-        if cmd not in m:
-            logging.warning("Unknown command '%s'", cmd)
-            return
+        if not cmd in m:
+            raise Exception("Unknown command '%s'" % cmd)
         m[cmd](*args)
 
     def on_path_manually_mounted(self, path, should_go):
@@ -1010,26 +948,34 @@ class Ojo:
             self.get_command_item(
                 "command:back" if self.get_back_folder() else None,
                 self.get_back_folder(),
-                icon="back", group="Navigate", nofocus=True,
+                icon="back",
+                group="Navigate",
+                nofocus=True,
             ),
             self.get_command_item(
                 "command:forward" if self.get_forward_folder() else None,
                 self.get_forward_folder(),
-                icon="forward", group="Navigate", nofocus=True,
+                icon="forward",
+                group="Navigate",
+                nofocus=True,
             ),
             self.get_command_item(
                 "command:up" if parent_folder else None,
                 parent_folder,
-                icon="up", group="Navigate", nofocus=True,
+                icon="up",
+                group="Navigate",
+                nofocus=True,
             ),
         ]
-        return {"label": "Navigate", "items": nav_items}
+        nav_category = {"label": "Navigate", "items": nav_items}
+        return nav_category
 
     def build_parent_category(self):
         parent_item = self.get_parent_folder_item()
         if parent_item:
             return {"label": "Parent Folder", "items": [parent_item]}
-        return None
+        else:
+            return None
 
     def build_subfolders_category(self):
         subfolders = self.list_subfolders()
@@ -1038,33 +984,27 @@ class Ojo:
         ]
         if subfolder_items:
             return {"label": "Subfolders", "items": subfolder_items}
-        return None
+        else:
+            return None
 
     def list_subfolders(self):
-        if not self.folder:
-            return []
-        try:
-            entries = os.listdir(self.folder)
-        except OSError:
-            return []
         folders = self.filter_hidden(
             [
                 os.path.join(self.folder, f)
-                for f in entries
+                for f in os.listdir(self.folder)
                 if os.path.isdir(os.path.join(self.folder, f))
             ]
         )
 
-        sort_by = options.get("sort_by", "name")
-        if sort_by in ("extension", "name", "size"):
+        if options["sort_by"] in ("extension", "name", "size"):
             key = lambda f: os.path.basename(f).lower()
-        elif sort_by in ("date", "exif_date"):
-            key = lambda f: self._safe_stat_mtime(f)
+        elif options["sort_by"] in ("date", "exif_date"):
+            key = lambda f: os.stat(f).st_mtime
         else:
             key = lambda f: f
 
         folders = sorted(folders, key=key)
-        if options.get("sort_order", "asc") == "desc" and sort_by != "size":
+        if options["sort_order"] == "desc" and options["sort_by"] != "size":
             folders = list(reversed(folders))
 
         return folders
@@ -1078,18 +1018,25 @@ class Ojo:
         if _u(self.folder) in config.bookmarks:
             bookmark_items.append(
                 self.get_command_item(
-                    "command:remove-bookmark", None,
-                    icon="remove", group="Bookmarks", label="Remove current",
+                    "command:remove-bookmark",
+                    None,
+                    icon="remove",
+                    group="Bookmarks",
+                    label="Remove current",
                 )
             )
         else:
             bookmark_items.append(
                 self.get_command_item(
-                    "command:add-bookmark", None,
-                    icon="add", group="Bookmarks", label="Add current",
+                    "command:add-bookmark",
+                    None,
+                    icon="add",
+                    group="Bookmarks",
+                    label="Add current",
                 )
             )
-        return {"label": "Bookmarks", "items": bookmark_items}
+        bookmarks_category = {"label": "Bookmarks", "items": bookmark_items}
+        return bookmarks_category
 
     def build_recent_category(self):
         recent_items = [
@@ -1099,7 +1046,8 @@ class Ojo:
         ][:5]
         if recent_items:
             return {"label": "Recent", "items": recent_items}
-        return None
+        else:
+            return None
 
     def build_places_category(self):
         places = self.places.get_places()
@@ -1112,8 +1060,11 @@ class Ojo:
             if can_mount:
                 command = "command:mount_and_go:" + place["mount_id"]
                 item = self.get_command_item(
-                    command=command, path=command,
-                    group="Places", label=place["label"], icon=place.get("icon"),
+                    command=command,
+                    path=command,
+                    group="Places",
+                    label=place["label"],
+                    icon=place["icon"],
                 )
                 item["with_command"] = {
                     "command": "ojo-mount:" + place["mount_id"],
@@ -1121,8 +1072,10 @@ class Ojo:
                 }
             elif place.get("path"):
                 item = self.get_folder_item(
-                    path=place["path"], group="Places",
-                    label=place["label"], icon=place.get("icon"),
+                    path=place["path"],
+                    group="Places",
+                    label=place["label"],
+                    icon=place["icon"],
                 )
                 if can_unmount:
                     item["with_command"] = {
@@ -1153,7 +1106,8 @@ class Ojo:
                     'ensure_category("Navigate")',
                     'ensure_category("Subfolders")',
                     "refresh_category(%s)" % json.dumps(self.build_places_category()),
-                    "refresh_category(%s)" % json.dumps(self.build_bookmarks_category()),
+                    "refresh_category(%s)"
+                    % json.dumps(self.build_bookmarks_category()),
                     "refresh_category(%s)" % json.dumps(self.build_recent_category()),
                     "on_contents_change()",
                 ]
@@ -1164,34 +1118,48 @@ class Ojo:
     def build_options_category(self):
         items = []
 
-        by = options.get("sort_by", "name")
-        order = options.get("sort_order", "asc")
+        by = options["sort_by"]
+        order = options["sort_order"]
         mapby = {
-            "extension": "type", "name": "name",
-            "date": "file date", "exif_date": "EXIF date", "size": "file size",
+            "extension": "type",
+            "name": "name",
+            "date": "file date",
+            "exif_date": "EXIF date",
+            "size": "file size",
         }
         mapord = {
             "desc": {
-                "extension": "Z to A", "name": "Z to A",
-                "date": "newest at top", "exif_date": "newest at top", "size": "big at top",
+                "extension": "Z to A",
+                "name": "Z to A",
+                "date": "newest at top",
+                "exif_date": "newest at top",
+                "size": "big at top",
             },
             "asc": {
-                "extension": "A to Z", "name": "A to Z",
-                "date": "oldest at top", "exif_date": "oldest at top", "size": "small at top",
+                "extension": "A to Z",
+                "name": "A to Z",
+                "date": "oldest at top",
+                "exif_date": "oldest at top",
+                "size": "small at top",
             },
         }
-        for s in ("name", "extension", "date", "exif_date", "size"):
-            if s != by:
+        for sort in ("name", "extension", "date", "exif_date", "size"):
+            if sort != by:
                 items.append(
                     self.get_command_item(
-                        "command:sort:" + s, None, None,
-                        group="Options", label="Sort by " + mapby[s],
+                        "command:sort:" + sort,
+                        None,
+                        None,
+                        group="Options",
+                        label="Sort by " + mapby[sort],
                     )
                 )
             else:
                 items.append(
                     self.get_command_item(
-                        None, None, None,
+                        None,
+                        None,
+                        None,
                         group="Options",
                         label="Sort by %s, %s" % (mapby[by], mapord[order][by]),
                     )
@@ -1199,81 +1167,112 @@ class Ojo:
 
         if order == "asc":
             m = {
-                "extension": "Order: Z to A", "name": "Order: Z to A",
-                "date": "Order: Newest at top", "exif_date": "Order: Newest at top",
+                "extension": "Order: Z to A",
+                "name": "Order: Z to A",
+                "date": "Order: Newest at top",
+                "exif_date": "Order: Newest at top",
                 "size": "Order: Big at top",
             }
             items.append(
-                self.get_command_item("command:sort:desc", None, None, group="Options", label=m[by])
+                self.get_command_item(
+                    "command:sort:desc", None, None, group="Options", label=m[by]
+                )
             )
         else:
             m = {
-                "extension": "Order: A to Z", "name": "Order: A to Z",
-                "date": "Order: Oldest at top", "exif_date": "Order: Oldest at top",
+                "extension": "Order: A to Z",
+                "name": "Order: A to Z",
+                "date": "Order: Oldest at top",
+                "exif_date": "Order: Oldest at top",
                 "size": "Order: Small at top",
             }
             items.append(
-                self.get_command_item("command:sort:asc", None, None, group="Options", label=m[by])
+                self.get_command_item(
+                    "command:sort:asc", None, None, group="Options", label=m[by]
+                )
             )
 
-        show_groups = options.get("show_groups_for", {})
-        if show_groups.get(by, False):
+        if options["show_groups_for"].get(by, False):
             items.append(
                 self.get_command_item(
-                    "command:groups:false", None, None,
-                    group="Options", label="Hide group labels for this sorting",
+                    "command:groups:false",
+                    None,
+                    None,
+                    group="Options",
+                    label="Hide group labels for this sorting",
                 )
             )
         else:
             items.append(
                 self.get_command_item(
-                    "command:groups:true", None, None,
-                    group="Options", label="Show group labels for this sorting",
+                    "command:groups:true",
+                    None,
+                    None,
+                    group="Options",
+                    label="Show group labels for this sorting",
                 )
             )
 
-        if options.get("show_hidden", False):
+        if options["show_hidden"]:
             items.append(
                 self.get_command_item(
-                    "command:hidden:false", None, None,
-                    group="Options", label="Hide hidden files",
+                    "command:hidden:false",
+                    None,
+                    None,
+                    group="Options",
+                    label="Hide hidden files",
                 )
             )
         else:
             items.append(
                 self.get_command_item(
-                    "command:hidden:true", None, None,
-                    group="Options", label="Show hidden files",
+                    "command:hidden:true",
+                    None,
+                    None,
+                    group="Options",
+                    label="Show hidden files",
                 )
             )
 
-        if options.get("show_captions", True):
+        if options["show_captions"]:
             items.append(
                 self.get_command_item(
-                    "command:captions:false", None, None,
-                    group="Options", label="Hide captions",
+                    "command:captions:false",
+                    None,
+                    None,
+                    group="Options",
+                    label="Hide captions",
                 )
             )
         else:
             items.append(
                 self.get_command_item(
-                    "command:captions:true", None, None,
-                    group="Options", label="Show captions",
+                    "command:captions:true",
+                    None,
+                    None,
+                    group="Options",
+                    label="Show captions",
                 )
             )
 
-        if options.get("show_folder_thumbs", False):
+        if options.show_folder_thumbs:
             items.append(
                 self.get_command_item(
-                    "command:folder_thumbs:false", None, None,
-                    group="Options", label="Hide folder thumbs",
+                    "command:folder_thumbs:false",
+                    None,
+                    None,
+                    group="Options",
+                    label="Hide folder thumbs",
                 )
             )
         else:
             items.append(
                 self.get_command_item(
-                    "command:folder_thumbs:true", None, None,
-                    group="Options", label="Show folder thumbs",
+                    "command:folder_thumbs:true",
+                    None,
+                    None,
+                    group="Options",
+                    label="Show folder thumbs",
                 )
             )
 
@@ -1283,19 +1282,20 @@ class Ojo:
         self.js("refresh_category(%s)" % json.dumps(category))
 
     def safe_basename(self, img):
-        return os.path.basename(img).replace("'", "\\'").replace("\\", "\\\\")
+        return os.path.basename(img).replace("'", "\\'")
 
     def render_folder_view(self):
         self.loading_folder = True
         thread_change_time = self.last_folder_change_time
         thread_folder = self.folder
-        self.js("set_font_size('%s')" % options.get("font_size", "12pt"))
-        thumbh = options.get("thumb_height", 180)
+        self.js("set_font_size('%s')" % options["font_size"])
+        thumbh = options["thumb_height"]
         self.js("set_thumb_height(%d)" % thumbh)
         self.js("change_folder('%s')" % util.path2url(self.folder))
 
         def _prepare_thread():
             def _render_folders():
+                # this call queries GTK icons, needs to run on GTK thread
                 folder_info = self.build_folder_info()
 
                 if (
@@ -1311,49 +1311,43 @@ class Ojo:
             pos = (
                 self.images.index(self.selected) if self.selected in self.images else 0
             )
-            if self.thumbs:
-                self.thumbs.priority_thumbs(
-                    [
-                        x[1]
-                        for x in sorted(
-                            enumerate(self.images), key=lambda i_f: abs(i_f[0] - pos)
-                        )
-                        if not os.path.exists(self.thumbs.get_cached_thumbnail_path(x[1]))
-                    ]
-                )
+            self.thumbs.priority_thumbs(
+                [
+                    x[1]
+                    for x in sorted(
+                        enumerate(self.images), key=lambda i_f: abs(i_f[0] - pos)
+                    )
+                    if not os.path.exists(self.thumbs.get_cached_thumbnail_path(x[1]))
+                ]
+            )
 
-            try:
-                folder_size = (
-                    util.human_size(sum(self._safe_stat_size(img) for img in self.images))
-                    if self.images
-                    else ""
-                )
-                latest_date = (
-                    self._format_date(max(self._safe_stat_mtime(img) for img in self.images))
-                    if self.images
-                    else ""
-                )
-            except Exception:
-                folder_size = ""
-                latest_date = ""
+            folder_size = (
+                util.human_size(sum(os.stat(img).st_size for img in self.images))
+                if self.images
+                else ""
+            )
+            latest_date = (
+                self._format_date(max(os.stat(img).st_mtime for img in self.images))
+                if self.images
+                else ""
+            )
             self.js(
                 "set_image_count(%d, '%s', '%s')"
                 % (len(self.images), folder_size, latest_date)
             )
 
             last_group = None
-            images_snapshot = list(self.images)
-            for img in images_snapshot:
+            for img in self.images:
                 if self.killed:
                     return
 
                 try:
                     group = None
                     groups_enabled = options.get("show_groups_for", {}).get(
-                        options.get("sort_by", "name"), False
+                        options["sort_by"], False
                     )
                     if groups_enabled:
-                        group = self.get_group_key(img, options.get("sort_by", "name"))
+                        group = self.get_group_key(img, options["sort_by"])
                         if group != last_group:
                             self.js(
                                 "add_group('%s', %s)"
@@ -1378,7 +1372,7 @@ class Ojo:
                                 util.path2url(img),
                                 self.safe_basename(img),
                                 "true" if img == self.selected else "false",
-                                "true" if options.get("show_captions", True) else "false",
+                                "true" if options["show_captions"] else "false",
                                 group if group else "",
                                 util.path2url(cached),
                             )
@@ -1391,10 +1385,13 @@ class Ojo:
                         try:
                             meta = metadata.get(img)
                             info = self.get_file_info(meta)
+
                             w, h = meta["width"], meta["height"]
-                            thumb_width = float(w) * min(h, thumbh) / max(h, 1)
-                        except Exception:
-                            thumb_width = 190
+                            thumb_width = float(w) * min(h, thumbh) / h
+                        except:
+                            thumb_width = (
+                                190  # best to match the width of the failed image
+                            )
 
                         self.js(
                             "add_image_div('%s', '%s', '%s', %s, %s, '%s', undefined, %f)"
@@ -1403,7 +1400,7 @@ class Ojo:
                                 util.path2url(img),
                                 self.safe_basename(img),
                                 "true" if img == self.selected else "false",
-                                "true" if options.get("show_captions", True) else "false",
+                                "true" if options["show_captions"] else "false",
                                 group if group else "",
                                 thumb_width,
                             )
@@ -1412,7 +1409,7 @@ class Ojo:
                         if info:
                             self.js(
                                 "set_file_info('%s', %s, %d)"
-                                % (util.path2url(img), json.dumps(info), int(thumb_width))
+                                % (util.path2url(img), json.dumps(info), thumb_width)
                             )
                 except Exception:
                     logging.exception(
@@ -1420,6 +1417,7 @@ class Ojo:
                     )
 
             self.select_in_browser(self.selected)
+
             self.loading_folder = False
 
         OjoThread(ojo=self, target=_prepare_thread).start()
@@ -1427,38 +1425,45 @@ class Ojo:
     def build_folder_info(self):
         categories = []
 
+        # Navigation
         categories.append(self.build_navigation_category())
 
+        # Parent folder
         parent_category = self.build_parent_category()
         if parent_category:
             categories.append(parent_category)
 
+        # Subfolders
         subfolders_category = self.build_subfolders_category()
         if subfolders_category:
             categories.append(subfolders_category)
 
+        # Places
         categories.append(self.build_places_category())
+
+        # Bookmarks
         categories.append(self.build_bookmarks_category())
 
-        recent = self.build_recent_category()
-        if recent:
-            categories.append(recent)
+        # Recent folders
+        categories.append(self.build_recent_category())
 
+        # Options
         categories.append(self.build_options_category())
 
-        return {"crumbs": self.get_crumbs(), "categories": categories}
+        folder_info = {"crumbs": self.get_crumbs(), "categories": categories}
+
+        return folder_info
 
     def cache_around(self):
-        if not self.images:
+        if not hasattr(self, "images") or not self.images:
             return
-        if self.selected not in self.images:
-            return
-        pos = self.images.index(self.selected)
+        pos = self.images.index(self.selected) if self.selected in self.images else 0
         for i in [1, -1]:
             if pos + i < 0 or pos + i >= len(self.images):
                 continue
             f = self.images[pos + i]
             if f not in self.pix_cache[self.zoom]:
+                logging.info("Caching around: file %s, zoomed %s" % (f, self.zoom))
                 self.cache_queue.put((f, self.zoom))
 
     def start_cache_thread(self):
@@ -1475,14 +1480,11 @@ class Ojo:
             logging.info("Starting cache thread")
             while not self.killed:
                 if len(self.pix_cache[False]) > CACHE_SIZE:
-                    _reduce_to_latest(self.pix_cache[False], CACHE_SIZE // 2)
+                    _reduce_to_latest(self.pix_cache[False], CACHE_SIZE / 2)
                 if len(self.pix_cache[True]) > CACHE_SIZE:
-                    _reduce_to_latest(self.pix_cache[True], CACHE_SIZE // 2)
+                    _reduce_to_latest(self.pix_cache[True], CACHE_SIZE / 2)
 
-                try:
-                    path, zoom = self.cache_queue.get(timeout=1)
-                except queue.Empty:
-                    continue
+                path, zoom = self.cache_queue.get()
                 if self.killed:
                     return
                 if path is None:
@@ -1490,6 +1492,9 @@ class Ojo:
 
                 try:
                     if path not in self.pix_cache[zoom]:
+                        logging.debug(
+                            "Cache thread loads file %s, zoomed %s" % (path, zoom)
+                        )
                         self.current_preparing = path, zoom
                         try:
                             self.get_pixbuf(path, force=True, zoom=zoom)
@@ -1508,6 +1513,7 @@ class Ojo:
             if not self.folder or os.path.normpath(
                 os.path.dirname(img)
             ) != os.path.normpath(self.folder):
+                # ignore thumbs that were returned after the folder was changed
                 return
             self.js(
                 "add_image('%s', '%s')"
@@ -1516,7 +1522,7 @@ class Ojo:
             if img == self.selected:
                 self.select_in_browser(img)
         else:
-            if options.get("show_folder_thumbs", False):
+            if options.show_folder_thumbs:
                 self.js(
                     "add_folderthumb('%s', '%s')"
                     % (util.path2url(img), util.path2url(thumb_path))
@@ -1524,6 +1530,7 @@ class Ojo:
 
     def on_thumb_failed(self, img, error_msg):
         self.js("remove_image_div('%s')" % util.path2url(img))
+        logging.warning("Could not add thumb for " + img)
 
     def set_margins(self, margin):
         self.margin = margin
@@ -1550,18 +1557,16 @@ class Ojo:
         )
 
     def get_max_image_width(self):
-        if options.get("fullscreen", False):
+        if options["fullscreen"]:
             return self.window.get_screen().get_width()
         elif self.manually_resized:
-            win = self.window.get_window()
             self.last_windowed_image_width = (
-                (win.get_width() if win else 800) - 2 * self.margin
+                self.window.get_window().get_width() - 2 * self.margin
             )
             return self.last_windowed_image_width
-        elif options.get("maximized", False):
-            win = self.window.get_window()
-            if win:
-                return win.get_width() - 2 * self.margin
+        elif options["maximized"]:
+            if self.window.get_window():
+                return self.window.get_window().get_width() - 2 * self.margin
             else:
                 return self.window.get_screen().get_width() - 40 - 2 * self.margin
         else:
@@ -1571,18 +1576,16 @@ class Ojo:
             return self.last_windowed_image_width
 
     def get_max_image_height(self):
-        if options.get("fullscreen", False):
+        if options["fullscreen"]:
             return self.window.get_screen().get_height()
         elif self.manually_resized:
-            win = self.window.get_window()
             self.last_windowed_image_height = (
-                (win.get_height() if win else 600) - 2 * self.margin
+                self.window.get_window().get_height() - 2 * self.margin
             )
             return self.last_windowed_image_height
-        elif options.get("maximized", False):
-            win = self.window.get_window()
-            if win:
-                return win.get_height() - 2 * self.margin
+        elif options["maximized"]:
+            if self.window.get_window():
+                return self.window.get_window().get_height() - 2 * self.margin
             else:
                 return self.window.get_screen().get_height() - 40 - 2 * self.margin
         else:
@@ -1592,9 +1595,7 @@ class Ojo:
             return self.last_windowed_image_height
 
     def increase_size(self):
-        if self.manually_resized or self.zoom or options.get("fullscreen", False):
-            return
-        if not hasattr(self, 'pixbuf') or not self.pixbuf:
+        if self.manually_resized or self.zoom or options["fullscreen"]:
             return
 
         new_width = max(
@@ -1616,7 +1617,7 @@ class Ojo:
 
     def go(self, direction, start_position=None):
         search = getattr(self, "search_text", "")
-        search = search[search.rfind("/") + 1:]
+        search = search[search.rfind("/") + 1 :]
         words = [w.lower() for w in search.split(" ") if w]
 
         applicable = (
@@ -1626,17 +1627,14 @@ class Ojo:
                 f
                 for f in self.images
                 if all(os.path.basename(f).lower().find(w) >= 0 for w in words)
-                or all((self.get_group_key(f) or "").lower().find(w) >= 0 for w in words)
+                or all((self.get_group_key(f) or "").find(w) >= 0 for w in words)
             ]
         )
-
-        if not applicable:
-            return
-
+        filename = None
         position = (
             start_position - direction
             if start_position is not None
-            else (applicable.index(self.selected) if self.selected in applicable else 0)
+            else applicable.index(self.selected)
         )
         position = max(0, min(len(applicable) - 1, position + direction))
         filename = applicable[position]
@@ -1646,12 +1644,13 @@ class Ojo:
                 self.show(filename)
             except Exception:
                 logging.exception("go: Could not show %s" % filename)
+                GObject.idle_add(lambda: self.go(direction))
 
         GObject.idle_add(_f)
 
     def toggle_fullscreen(self, full=None, first_run=False):
         if full is None:
-            full = not options.get("fullscreen", False)
+            full = not options["fullscreen"]
         options["fullscreen"] = full
         config.save_options()
 
@@ -1662,10 +1661,8 @@ class Ojo:
             if not options["fullscreen"]:
                 width = getattr(self, "last_windowed_image_width", None)
                 height = getattr(self, "last_windowed_image_height", None)
-            try:
-                self.get_pixbuf(self.shown, force=True, width=width, height=height)
-            except Exception:
-                pass
+            # caches the new image before we start changing sizes
+            self.get_pixbuf(self.shown, force=True, width=width, height=height)
 
         self.update_margins()
         if options["fullscreen"]:
@@ -1680,7 +1677,7 @@ class Ojo:
             self.js("setTimeout(scroll_to_selected, 100)")
 
     def update_margins(self):
-        if options.get("fullscreen", False):
+        if options["fullscreen"]:
             util.make_transparent(
                 self.window,
                 color="rgba(77, 75, 69, 1)"
@@ -1702,18 +1699,17 @@ class Ojo:
             self.set_cursor(Gdk.CursorType.HAND1)
         elif self.mousedown_panning:
             self.set_cursor(Gdk.CursorType.HAND1)
-        elif options.get("fullscreen", False) and self.mode == "image":
+        elif options["fullscreen"] and self.mode == "image":
             self.set_cursor(Gdk.CursorType.BLANK_CURSOR)
         else:
             self.set_cursor(Gdk.CursorType.ARROW)
 
     def set_cursor(self, cursor):
-        win = self.window.get_window()
-        if win and (
-            not win.get_cursor()
-            or cursor != win.get_cursor().get_cursor_type()
+        if self.window.get_window() and (
+            not self.window.get_window().get_cursor()
+            or cursor != self.window.get_window().get_cursor().get_cursor_type()
         ):
-            win.set_cursor(
+            self.window.get_window().set_cursor(
                 Gdk.Cursor.new_for_display(Gdk.Display.get_default(), cursor)
             )
 
@@ -1725,7 +1721,7 @@ class Ojo:
             elif self.mode == "folder":
                 self.been_in_folder_mode = True
                 self.shown = None
-                self.window.set_title(f"ojoooo - {self.folder}")
+                self.window.set_title(f"ojoooo -{self.folder}")
                 if hasattr(self, "browser"):
                     self.browser.grab_focus()
 
@@ -1740,11 +1736,12 @@ class Ojo:
         GObject.idle_add(_go)
 
     def exit(self, *args):
-        if self.killed:
-            return
-        self.killed = True
+        """
+        Makes sure we'll exit regardless of GTK/multithreading/multiprocessing hiccups
+        """
         logging.info("Exiting, closing window...")
         self.window.hide()
+        logging.info("Window closed")
 
         def _exit(*args):
             self.killed = True
@@ -1754,16 +1751,17 @@ class Ojo:
                     self.thumbs.stop()
                 if self.folder_thumbs:
                     self.folder_thumbs.stop()
+                logging.info("Thumb threads and processes stopped")
 
                 logging.info("Waiting for threads to finish...")
-                if hasattr(self, 'cache_queue'):
-                    self.cache_queue.put((None, None))
-                deadline = time.time() + 5
-                while self.threads and time.time() < deadline:
+                self.cache_queue.put((None, None))
+                while self.threads:
                     time.sleep(0.05)
+                logging.info("Threads finished")
 
                 logging.info("Stopping exiftool process...")
                 imaging.stop_exiftool_process()
+                logging.info("Exiftool process stopped")
 
                 logging.info("Calling Gtk.main_quit")
                 GObject.idle_add(Gtk.main_quit)
@@ -1786,8 +1784,8 @@ class Ojo:
             % (
                 "true" if visible else "false",
                 "true" if bypass_search else "false",
-                set_search_field_to.replace("'", "\\'"),
-                search_for.replace("'", "\\'"),
+                set_search_field_to,
+                search_for,
             )
         )
 
@@ -1798,9 +1796,13 @@ class Ojo:
 
     def process_key(self, widget=None, event=None, key=None, skip_browser=False):
         if event:
+            # prevent processing duplicate events that happen sometimes when focusing web_view
             if event.time == self.last_key_event_time:
+                # keypress events seem to come two at a time, at least in Ubuntu 22.04
+                # this logic would ignore every second event, and reset state afterwards
                 self.last_key_event_time = None
                 return
+
             self.last_key_event_time = event.time
 
         key = key or Gdk.keyval_name(event.keyval)
@@ -1819,25 +1821,25 @@ class Ojo:
             self.toggle_fullscreen()
         elif key == "F5":
             if self.ctrl_key(event) and self.mode == "folder":
-                if self.thumbs:
-                    self.thumbs.clear_thumbnails(self.folder)
-                if self.folder_thumbs:
-                    folder_thumb_path = self.folder_thumbs.get_folder_thumbnail_path(
-                        self.folder
-                    )
-                    try:
-                        os.unlink(folder_thumb_path)
-                    except OSError:
-                        pass
-                    self.folder_thumbs.priority_thumbs([folder_thumb_path])
+                self.thumbs.clear_thumbnails(self.folder)
+                folder_thumb_path = self.folder_thumbs.get_folder_thumbnail_path(
+                    self.folder
+                )
+                try:
+                    os.unlink(folder_thumb_path)
+                except:
+                    pass
+                self.folder_thumbs.priority_thumbs([folder_thumb_path])
             self.show(self.selected if self.mode == "image" else self.folder)
         elif key == "Return":
             if self.mode == "image":
                 self.set_mode("folder")
             else:
-                prev = self.selected
+                prev = (
+                    self.selected
+                )  # save selected from before the action, as it might change it
                 self.show()
-                if prev and os.path.isfile(prev):
+                if os.path.isfile(prev):
                     self.set_mode("image")
         elif self.check_letter_shortcut(
             event, [31], mask=Gdk.ModifierType.CONTROL_MASK
@@ -1903,13 +1905,13 @@ class Ojo:
             self.update_zoomed_views()
 
     def increase_thumb_height(self):
-        bigger = [th for th in THUMBHEIGHTS if th > options.get("thumb_height", 180)]
+        bigger = [th for th in THUMBHEIGHTS if th > options["thumb_height"]]
         if bigger:
             options["thumb_height"] = bigger[0]
             self.change_to_folder(self.folder)
 
     def decrease_thumb_height(self):
-        smaller = [th for th in THUMBHEIGHTS if th < options.get("thumb_height", 180)]
+        smaller = [th for th in THUMBHEIGHTS if th < options["thumb_height"]]
         if smaller:
             options["thumb_height"] = smaller[-1]
             self.change_to_folder(self.folder)
@@ -1917,9 +1919,9 @@ class Ojo:
     def set_zoom(self, zoom, x_percent=None, y_percent=None):
         self.zoom = zoom
         if x_percent is None:
-            x_percent = getattr(self, 'zoom_x_percent', 0.5)
+            x_percent = self.zoom_x_percent
         if y_percent is None:
-            y_percent = getattr(self, 'zoom_y_percent', 0.5)
+            y_percent = self.zoom_y_percent
         self.zoom_x_percent = x_percent
         self.zoom_y_percent = y_percent
 
@@ -1931,12 +1933,10 @@ class Ojo:
         self.update_zoom_scrolling()
 
     def get_width(self):
-        win = self.window.get_window()
-        return win.get_width() if win else 1
+        return self.window.get_window().get_width() if self.window.get_window() else 1
 
     def get_height(self):
-        win = self.window.get_window()
-        return win.get_height() if win else 1
+        return self.window.get_window().get_height() if self.window.get_window() else 1
 
     def mouse_motion(self, widget, event):
         if not self.mousedown_zoomed and not self.mousedown_panning:
@@ -2014,8 +2014,10 @@ class Ojo:
         if self.mode != "image" or self.zoom:
             return
         if event.direction not in (
-            Gdk.ScrollDirection.UP, Gdk.ScrollDirection.LEFT,
-            Gdk.ScrollDirection.DOWN, Gdk.ScrollDirection.RIGHT,
+            Gdk.ScrollDirection.UP,
+            Gdk.ScrollDirection.LEFT,
+            Gdk.ScrollDirection.DOWN,
+            Gdk.ScrollDirection.RIGHT,
         ):
             return
 
@@ -2042,24 +2044,21 @@ class Ojo:
         width = width or self.get_max_image_width()
         height = height or self.get_max_image_height()
 
-        wait_count = 0
         while not force and self.current_preparing == (filename, zoom):
-            self.preparing_event.wait(timeout=2)
+            logging.info("Waiting on cache")
+            self.preparing_event.wait()
             self.preparing_event.clear()
-            wait_count += 1
-            if wait_count > 5:
-                break
-
         if filename in self.pix_cache[zoom]:
             cached = self.pix_cache[zoom][filename]
             if cached[1] == width:
+                logging.info("Cache hit: " + filename)
                 return cached[0]
 
         meta = metadata.get(filename)
         image_width, image_height = meta["width"], meta["height"]
 
         if not zoom:
-            enlarge_smaller = options.get("enlarge_smaller", False)
+            enlarge_smaller = options["enlarge_smaller"]
             target_width = width if enlarge_smaller else min(width, image_width)
             target_height = height if enlarge_smaller else min(height, image_height)
         else:
@@ -2068,7 +2067,9 @@ class Ojo:
         pixbuf = get_pixbuf(filename, target_width, target_height)
 
         if filename in self.pix_cache[zoom]:
-            del self.pix_cache[zoom][filename]
+            del self.pix_cache[zoom][
+                filename
+            ]  # we use OrderedDict for LRU, this makes sure filename will now be last
         self.pix_cache[zoom][filename] = pixbuf, width, time.time()
 
         return pixbuf

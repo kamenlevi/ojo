@@ -1,5 +1,4 @@
 # coding=utf-8
-import base64
 import io
 import logging
 import os
@@ -11,44 +10,101 @@ import gi
 from gi.repository import GdkPixbuf, Gio, GObject
 from PIL import Image
 
+try:
+    _LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:
+    _LANCZOS = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', 1))
+
 from ojo import config
 from ojo.exiftool import ExifTool
 from ojo.metadata import metadata
 from ojo.util import ext
 
-try:
-    _LANCZOS = Image.Resampling.LANCZOS
-except AttributeError:
-    _LANCZOS = Image.LANCZOS
-
 gi.require_version("GdkPixbuf", "2.0")
 
+# supported by PIL, as per http://infohost.nmt.edu/tcc/help/pubs/pil/formats.html:
 NON_RAW_FORMATS = {
-    ".bmp", ".dib", ".dcx", ".eps", ".ps", ".gif", ".im",
-    ".jpg", ".jpe", ".jpeg", ".pcd", ".pcx", ".png",
-    ".pbm", ".pgm", ".ppm", ".psd", ".tif", ".tiff",
-    ".xbm", ".xpm", ".webp", ".avif", ".heic", ".heif",
-    ".jxl",
+    ".bmp",
+    ".dib",
+    ".dcx",
+    ".eps",
+    ".ps",
+    ".gif",
+    ".im",
+    ".jpg",
+    ".jpe",
+    ".jpeg",
+    ".pcd",
+    ".pcx",
+    ".png",
+    ".pbm",
+    ".pgm",
+    ".ppm",
+    ".psd",
+    ".tif",
+    ".tiff",
+    ".xbm",
+    ".xpm",
 }
 
+# RAW formats, as per https://en.wikipedia.org/wiki/Raw_image_format#Annotated_list_of_file_extensions,
+# we rely on pyexiv2 previews for these:
 RAW_FORMATS = {
-    ".3fr", ".ari", ".arw", ".bay", ".braw", ".crw", ".cr2", ".cr3",
-    ".cap", ".data", ".dcs", ".dcr", ".dng", ".drf", ".eip", ".erf",
-    ".fff", ".gpr", ".iiq", ".k25", ".kdc", ".mdc", ".mef", ".mos",
-    ".mrw", ".nef", ".nrw", ".obm", ".orf", ".pef", ".ptx", ".pxn",
-    ".r3d", ".raf", ".raw", ".rwl", ".rw2", ".rwz", ".sr2", ".srf",
-    ".srw", ".tif", ".x3f",
+    ".3fr",
+    ".ari",
+    ".arw",
+    ".bay",
+    ".braw",
+    ".crw",
+    ".cr2",
+    ".cr3",
+    ".cap",
+    ".data",
+    ".dcs",
+    ".dcr",
+    ".dng",
+    ".drf",
+    ".eip",
+    ".erf",
+    ".fff",
+    ".gpr",
+    ".iiq",
+    ".k25",
+    ".kdc",
+    ".mdc",
+    ".mef",
+    ".mos",
+    ".mrw",
+    ".nef",
+    ".nrw",
+    ".obm",
+    ".orf",
+    ".pef",
+    ".ptx",
+    ".pxn",
+    ".r3d",
+    ".raf",
+    ".raw",
+    ".rwl",
+    ".rw2",
+    ".rwz",
+    ".sr2",
+    ".srf",
+    ".srw",
+    ".tif",
+    ".x3f",
 }
 
-_supported_extensions_cache = None
 
 exiftool = None
 _lock = threading.Lock()
 
 
+# ExifTool is not Thread-safe, so we start one for every subprocess that requires it
 def start_exiftool_process(show_version=False):
     logging.debug('Starting exiftool in process %d', os.getpid())
     global exiftool
+    global _lock
     with _lock:
         exiftool = ExifTool(executable=config.get_exiftool_path())
         exiftool.start(show_version)
@@ -56,6 +112,7 @@ def start_exiftool_process(show_version=False):
 
 def stop_exiftool_process():
     global exiftool
+    global _lock
     with _lock:
         if exiftool:
             exiftool.terminate()
@@ -65,14 +122,12 @@ def stop_exiftool_process():
 def get_optimal_preview(filename, to_folder, width=None, height=None):
     exiftool.extract_previews(filename, to_folder)
 
+    # filter to just jpeg and png previews (tiffs are sometimes present too)
     previews = [
         {"path": os.path.join(to_folder, name)}
         for name in os.listdir(to_folder)
         if name.endswith((".jpg", ".jpeg", ".png"))
     ]
-
-    if not previews:
-        raise Exception("No previews found for %s" % filename)
 
     for p in previews:
         w, h = get_size_via_pixbuf(p["path"])
@@ -80,8 +135,10 @@ def get_optimal_preview(filename, to_folder, width=None, height=None):
         p["height"] = h
 
     if width is None or height is None:
+        # if no resizing required - use the biggest image
         preview = max(previews, key=lambda p: p["width"])
     else:
+        # else use the smallest image that is bigger than the desired size
         bigger = [p for p in previews if p["width"] >= width and p["height"] >= height]
         if bigger:
             preview = min(bigger, key=lambda p: p["width"])
@@ -97,16 +154,16 @@ def get_pil(filename, width=None, height=None, fallback_to_preview=False):
 
     try:
         pil_image = Image.open(filename)
-        pil_image.load()
-    except (IOError, OSError, Image.DecompressionBombError):
+    except IOError:
         if not fallback_to_preview:
             raise
         with tempfile.TemporaryDirectory(prefix="ojo") as to_folder:
             optimal_preview = get_optimal_preview(filename, to_folder, width, height)
             pil_image = Image.open(optimal_preview)
-            pil_image.load()
 
     if width is not None:
+        # thumbnail, than auto-rotate (so we work rotate a smaller image), than re-thumbnail
+        # because the rotation might chnage width/height
         pil_image.thumbnail((max(width, height), max(width, height)), _LANCZOS)
         pil_image = auto_rotate_pil(orientation, pil_image)
         if pil_image.size[0] > width or pil_image.size[1] > height:
@@ -128,32 +185,38 @@ def get_pixbuf(filename, width=None, height=None):
                 optimal_preview = get_optimal_preview(filename, to_folder, width, height)
                 pixbuf = pixbuf_from_file(optimal_preview)
             pixbuf = auto_rotate_pixbuf(orientation, pixbuf)
+            logging.debug("Loaded from preview")
             return pixbuf
         except Exception:
-            return None
+            return None  # below we'll use another method
 
     def _from_gdk_pixbuf():
         try:
             pixbuf = pixbuf_from_file(filename)
             pixbuf = auto_rotate_pixbuf(orientation, pixbuf)
+            logging.debug("Loaded directly")
             return pixbuf
-        except Exception:
-            return None
+        except GObject.GError:
+            return None  # below we'll use another method
 
     def _from_pil():
         try:
             pil = get_pil(filename)
             pixbuf = pil_to_pixbuf(pil)
+            logging.debug("Loaded with PIL")
             pil.close()
             return pixbuf
-        except Exception:
+        except:
             return None
 
     if ext(filename) in RAW_FORMATS:
+        # raw file, prefer preview with max size
         pixbuf = _from_preview()
         if not pixbuf:
             pixbuf = _from_gdk_pixbuf()
     else:
+        # ordinary image, prefer loading with GdkPixbuf directly
+        # (previews here might be present, but wrong)
         pixbuf = _from_gdk_pixbuf()
         if not pixbuf:
             pixbuf = _from_preview()
@@ -165,35 +228,41 @@ def get_pixbuf(filename, width=None, height=None):
         raise Exception("Could not load %s" % filename)
 
     if width is not None and (width < image_width or height < image_height):
-        ratio = float(image_width) / image_height
-        if float(width) / height < ratio:
-            new_w = width
-            new_h = max(1, int(width / ratio))
+        # scale it
+        if float(width) / height < float(image_width) / image_height:
+            pixbuf = pixbuf.scale_simple(
+                width, int(float(width) * image_height / image_width), GdkPixbuf.InterpType.BILINEAR
+            )
         else:
-            new_h = height
-            new_w = max(1, int(height * ratio))
-        pixbuf = pixbuf.scale_simple(new_w, new_h, GdkPixbuf.InterpType.BILINEAR)
+            pixbuf = pixbuf.scale_simple(
+                int(float(height) * image_width / image_height),
+                height,
+                GdkPixbuf.InterpType.BILINEAR,
+            )
 
     return pixbuf
 
 
 def thumbnail(filename, thumb_path, width, height):
     temp_fd, tmp_thumb_path = tempfile.mkstemp(prefix="ojo_thumbnail_")
-    os.close(temp_fd)
 
     def use_pil():
         pil = get_pil(filename, width, height)
         try:
-            pil.save(tmp_thumb_path, "JPEG", quality=85, optimize=True)
+            pil.save(tmp_thumb_path, "JPEG")
+        except Exception:
+            logging.exception("Could not save thumbnail in format %s:" % format)
+            raise
         finally:
             pil.close()
 
     def use_pixbuf():
         pixbuf = get_pixbuf(filename, width, height)
-        pixbuf.savev(tmp_thumb_path, "jpeg", ["quality"], ["85"])
+        pixbuf.savev(tmp_thumb_path, "png", [], [])
 
     cache_dir = os.path.dirname(thumb_path)
-    os.makedirs(cache_dir, exist_ok=True)
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
 
     if ext(filename) in {".gif", ".png", ".svg", ".xpm"}.union(RAW_FORMATS):
         try:
@@ -206,7 +275,9 @@ def thumbnail(filename, thumb_path, width, height):
         except Exception:
             use_pixbuf()
 
-    os.replace(tmp_thumb_path, thumb_path)
+    os.rename(tmp_thumb_path, thumb_path)
+    os.close(temp_fd)
+
     return filename, thumb_path
 
 
@@ -215,10 +286,21 @@ def folder_thumb_height(thumb_height):
 
 
 def folder_thumbnail(folder, thumb_path, width, height, kill_event):
+    """
+    Create the cache folder for the thumb
+    :param folder: folder path
+    :param thumb_path: thumb path to save thumb to
+    :param width: max width of a single image thumbnail (standard non-folder one)
+    :param height: height of a single image thumbnail (standard non-folder one, as set in options)
+    :param kill_event: multiprocessing.Event that will be set when app is exiting
+    :return: (folder, thumb path), or (folder, None) if folder contains no images
+    """
     cache_dir = os.path.dirname(thumb_path)
-    os.makedirs(cache_dir, exist_ok=True)
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
 
     images = list_images(folder)
+
     if not images:
         return folder, None
 
@@ -246,7 +328,6 @@ def folder_thumbnail(folder, thumb_path, width, height, kill_event):
             fthumb_image = get_pil(fthumb, MAX_WIDTH, THUMB_HEIGHT)
             w, h = fthumb_image.size
             if total_width + MARGIN + w > MAX_WIDTH + 100:
-                fthumb_image.close()
                 break
             image.paste(fthumb_image, (total_width, 0, total_width + w, h))
             fthumb_image.close()
@@ -257,66 +338,99 @@ def folder_thumbnail(folder, thumb_path, width, height, kill_event):
     if total_width > 0:
         image = image.crop((0, 0, min(MAX_WIDTH, total_width), THUMB_HEIGHT))
         fd, tmp_thumb_path = tempfile.mkstemp(prefix="ojo_folder_thumbnail_")
-        os.close(fd)
         image.save(tmp_thumb_path, "PNG")
-        os.replace(tmp_thumb_path, thumb_path)
+        os.rename(tmp_thumb_path, thumb_path)
+        os.close(fd)
 
     return folder, thumb_path
 
 
 def auto_rotate_pil(orientation, im):
+    """
+    From exiftool documentation
+
+    1 = Horizontal (normal)
+    2 = Mirror horizontal
+    3 = Rotate 180
+    4 = Mirror vertical
+    5 = Mirror horizontal and rotate 270 CW
+    6 = Rotate 90 CW
+    7 = Mirror horizontal and rotate 90 CW
+    8 = Rotate 270 CW
+    """
+    # We rotate regarding to the EXIF orientation information
     if orientation is None:
-        return im
+        result = im
     elif orientation in (1, "Horizontal (normal)"):
-        return im
+        result = im
     elif orientation in (2, "Mirror horizontal"):
-        return im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        result = im.transpose(Image.FLIP_LEFT_RIGHT)
     elif orientation in (3, "Rotate 180"):
-        return im.transpose(Image.Transpose.ROTATE_180)
+        result = im.transpose(Image.ROTATE_180)
     elif orientation in (4, "Mirror vertical"):
-        return im.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        result = im.transpose(Image.FLIP_TOP_BOTTOM)
     elif orientation in (5, "Mirror horizontal and rotate 270 CW"):
-        return im.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_90)
+        result = im.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_90)
     elif orientation in (6, "Rotate 90 CW"):
-        return im.transpose(Image.Transpose.ROTATE_270)
+        result = im.transpose(Image.ROTATE_270)
     elif orientation in (7, "Mirror horizontal and rotate 90 CW"):
-        return im.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_270)
+        result = im.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_270)
     elif orientation in (8, "Rotate 270 CW"):
-        return im.transpose(Image.Transpose.ROTATE_90)
-    return im
+        result = im.transpose(Image.ROTATE_90)
+    else:
+        result = im
+
+    return result
 
 
 def auto_rotate_pixbuf(orientation, im):
+    """
+    From exiftool documentation
+
+    1 = Horizontal (normal)
+    2 = Mirror horizontal
+    3 = Rotate 180
+    4 = Mirror vertical
+    5 = Mirror horizontal and rotate 270 CW
+    6 = Rotate 90 CW
+    7 = Mirror horizontal and rotate 90 CW
+    8 = Rotate 270 CW
+    """
+    # prefer the orientation specified in the pixbuf, if any
     try:
         orientation = int(im.get_options()["orientation"])
-    except Exception:
+    except:
         pass
 
+    # We rotate regarding to the EXIF orientation information
     if orientation is None:
-        return im
+        result = im
     elif orientation in (1, "Horizontal (normal)"):
-        return im
+        result = im
     elif orientation in (2, "Mirror horizontal"):
-        return im.flip(True)
+        result = im.flip(True)
     elif orientation in (3, "Rotate 180"):
-        return im.rotate_simple(180)
+        result = im.rotate_simple(180)
     elif orientation in (4, "Mirror vertical"):
-        return im.flip(False)
+        result = im.flip(False)
     elif orientation in (5, "Mirror horizontal and rotate 270 CW"):
-        return im.flip(True).rotate_simple(90)
+        result = im.flip(True).rotate_simple(90)
     elif orientation in (6, "Rotate 90 CW"):
-        return im.rotate_simple(270)
+        result = im.rotate_simple(270)
     elif orientation in (7, "Mirror horizontal and rotate 90 CW"):
-        return im.flip(True).rotate_simple(270)
+        result = im.flip(True).rotate_simple(270)
     elif orientation in (8, "Rotate 270 CW"):
-        return im.rotate_simple(90)
-    return im
+        result = im.rotate_simple(90)
+    else:
+        result = im
+
+    return result
 
 
 def pil_to_pixbuf(pil_image):
-    if pil_image.mode != "RGB":
+    if pil_image.mode != "RGB":  # Fix IOError: cannot write mode P as PPM
         pil_image = pil_image.convert("RGB")
-    buff = io.BytesIO()
+    buff = io.StringIO()
     pil_image.save(buff, "ppm")
     contents = buff.getvalue()
     buff.close()
@@ -328,11 +442,11 @@ def pil_to_pixbuf(pil_image):
 
 
 def pil_to_base64(pil_image):
-    output = io.BytesIO()
+    output = io.StringIO()
     pil_image.save(output, "PNG")
-    contents = base64.b64encode(output.getvalue()).decode("ascii")
+    contents = output.getvalue().encode("base64")
     output.close()
-    return contents
+    return contents.replace("\n", "")
 
 
 def pixbuf_from_data(data):
@@ -345,31 +459,35 @@ def pixbuf_from_file(filename):
 
 
 def pixbuf_to_b64(pixbuf):
-    return base64.b64encode(pixbuf.save_to_bufferv("png", [], [])[1]).decode("ascii")
+    return pixbuf.save_to_bufferv("png", [], [])[1].encode("base64").replace("\n", "")
 
 
 def get_supported_image_extensions():
-    global _supported_extensions_cache
-    if _supported_extensions_cache is None:
-        _supported_extensions_cache = set(NON_RAW_FORMATS) | set(RAW_FORMATS)
-        for fmt in GdkPixbuf.Pixbuf.get_formats():
-            for e in fmt.get_extensions():
-                _supported_extensions_cache.add('.' + e.lower())
-    return _supported_extensions_cache
+    fn = get_supported_image_extensions
+    if not hasattr(fn, "image_formats"):
+        fn.image_formats = NON_RAW_FORMATS.union(RAW_FORMATS)
+
+        # supported by GdkPixbuf:
+        for l in [f.get_extensions() for f in GdkPixbuf.Pixbuf.get_formats()]:
+            fn.image_formats = fn.image_formats.union(['.' + e.lower() for e in l])
+
+    return fn.image_formats
 
 
 def get_size_via_pixbuf(image):
-    fmt, image_width, image_height = GdkPixbuf.Pixbuf.get_file_info(image)
-    if fmt:
+    format, image_width, image_height = GdkPixbuf.Pixbuf.get_file_info(image)
+    if format:
         return image_width, image_height
-    try:
-        with Image.open(image) as im:
-            return im.size
-    except Exception:
-        raise Exception("Not an image or unsupported image format")
+    else:
+        try:
+            with Image.open(image) as im:
+                return im.size
+        except:
+            raise Exception("Not an image or unsupported image format")
 
 
 def is_image(filename):
+    """Decide if something might be a supported image based on extension"""
     try:
         return os.path.isfile(filename) and ext(filename) in get_supported_image_extensions()
     except Exception:
@@ -377,9 +495,4 @@ def is_image(filename):
 
 
 def list_images(folder):
-    try:
-        entries = os.listdir(folder)
-    except OSError:
-        return []
-    full_paths = [os.path.join(folder, f) for f in entries]
-    return [f for f in full_paths if is_image(f)]
+    return list(filter(is_image, [os.path.join(folder, f) for f in os.listdir(folder)]))

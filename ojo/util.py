@@ -1,4 +1,3 @@
-import functools
 import logging
 import os
 import urllib.request
@@ -48,14 +47,10 @@ def get_folder_icon(path, size):
 
 
 def get_icon_path(icon_name, size, fallback="folder"):
-    if icon_name and os.path.isfile(icon_name):
-        return icon_name
     icon = Gtk.IconTheme.get_default().lookup_icon(icon_name, size, 0)
     if not icon:
         logging.warning("Could not find icon for name " + icon_name)
         icon = Gtk.IconTheme.get_default().lookup_icon(fallback, size, 0)
-    if not icon:
-        return ""
     return icon.get_filename()
 
 
@@ -132,7 +127,6 @@ def debounce(wait):
         have elapsed since the last time it was invoked. """
 
     def decorator(fn):
-        @functools.wraps(fn)
         def debounced(*args, **kwargs):
             def call_it():
                 fn(*args, **kwargs)

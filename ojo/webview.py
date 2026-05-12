@@ -27,42 +27,38 @@ class WebView:
         if commands:
             all_commands += commands
 
-        if not all_commands and not self.js_queue:
-            return
-
         if self.is_loaded:
+
             def _do_queue():
-                batch = list(self.js_queue)
-                self.js_queue.clear()
-                for cmd in batch:
-                    self.web_view.run_javascript(cmd, None, None, None)
+                while self.js_queue:
+                    queued = self.js_queue.pop(0)
+                    self.web_view.run_javascript(queued, None, None, None)
                 for cmd in all_commands:
                     self.web_view.run_javascript(cmd, None, None, None)
 
             GObject.idle_add(_do_queue)
         else:
-            self.js_queue.extend(all_commands)
+            for cmd in all_commands:
+                logging.debug("Postponing js: " + cmd)
+                self.js_queue.append(cmd)
+            GObject.timeout_add(100, lambda: self.js())
 
     def load(self, html_filename, on_load_fn=None, on_action_fn=None):
         self.web_view = WebKit2.WebView()
         self.web_view.set_can_focus(True)
 
-        settings = self.web_view.get_settings()
-        settings.set_enable_smooth_scrolling(True)
-        settings.set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.NEVER)
-
         def nav(wv, dialog):
             try:
                 command = dialog.get_message()
+                logging.debug("Received command: " + command)
                 if on_action_fn and command:
-                    command = command[command.index("|") + 1:]
+                    command = command[command.index("|") + 1 :]
                     index = command.index(":")
                     action = command[:index]
-                    argument = command[index + 1:]
+                    argument = command[index + 1 :]
                     on_action_fn(action, argument)
-            except Exception:
-                logging.exception("Error processing browser command")
-            return True
+            finally:
+                return True
 
         self.web_view.connect("script-dialog", nav)
 
